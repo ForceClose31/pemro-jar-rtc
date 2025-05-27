@@ -4,25 +4,22 @@ const http = require("http");
 const server = http.createServer(app);
 const { Server } = require("socket.io");
 const io = new Server(server);
-const PORT = 3001;
+const PORT = 3000;
 
 app.use(express.static("public"));
 
-const rooms = {};
-
-io.on("connection", (socket) => {
-    console.log(`User connected: ${socket.id}`);
-
+io.on("connection", socket => {
     socket.join("room1");
-    if (!rooms["room1"]) rooms["room1"] = new Set();
-    rooms["room1"].add(socket.id);
 
-    const joinedUsers = Array.from(rooms["room1"]).filter((id) => id !== socket.id);
-    if (joinedUsers.length > 0) {
-        socket.emit("ada user lain", joinedUsers);
+    const joinedUsers = io.sockets.adapter.rooms.get("room1");
+    const totalUsers = joinedUsers ? joinedUsers.size : 0;
+
+    console.log(`User connected: ${socket.id}`);
+    console.log(`Total users in room1: ${totalUsers}`);
+
+    if (totalUsers > 1) {
+        socket.emit("ada user lain", [...joinedUsers]);
     }
-
-    socket.broadcast.to("room1").emit("ada user lain", [socket.id]);
 
     socket.on("offer", ({ offer, to: targetId, from }) => {
         io.to(targetId).emit("offer", { offer, from });
@@ -36,17 +33,14 @@ io.on("connection", (socket) => {
         io.to(targetId).emit("ice candidate", iceCandidate);
     });
 
-    socket.on("chatMessage", ({ message, from, to: targetId }) => {
-        io.to(targetId).emit("chatMessage", { message, from });
-    });
-
     socket.on("disconnect", () => {
         console.log(`User disconnected: ${socket.id}`);
-        rooms["room1"].delete(socket.id);
-        socket.broadcast.to("room1").emit("ada user lain", Array.from(rooms["room1"]));
+        const updatedUsers = io.sockets.adapter.rooms.get("room1");
+        const updatedTotal = updatedUsers ? updatedUsers.size : 0;
+        console.log(`Total users in room1: ${updatedTotal}`);
     });
 });
 
 server.listen(PORT, () => {
-    console.log(`Server is running on http://localhost:${PORT}`);
+    console.log(`Server running on port ${PORT}`);
 });

@@ -6,35 +6,76 @@ let remoteId;
 
 const socket = io();
 
+const userVolumeMeter = document.querySelector(".user-volume");
+const remoteVolumeMeter = document.querySelector(".remote-volume");
+
+const createVolumeBar = (container) => {
+    const bar = document.createElement("div");
+    container.appendChild(bar);
+    return bar;
+};
+
+const userVolumeBar = createVolumeBar(userVolumeMeter);
+const remoteVolumeBar = createVolumeBar(remoteVolumeMeter);
+
+let userAudioContext;
+let userAnalyser;
+let userSource;
+
+let remoteAudioContext;
+let remoteAnalyser;
+
+function setupAudioMeter(stream, volumeBar) {
+    const audioContext = new AudioContext();
+    const source = audioContext.createMediaStreamSource(stream);
+    const analyser = audioContext.createAnalyser();
+    analyser.fftSize = 256;
+    source.connect(analyser);
+
+    const dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+    function updateVolume() {
+        analyser.getByteFrequencyData(dataArray);
+        let values = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+            values += dataArray[i];
+        }
+        const average = values / dataArray.length;
+        const volumePercent = Math.min(100, Math.max(0, average / 2));
+        volumeBar.style.width = volumePercent + "%";
+        requestAnimationFrame(updateVolume);
+    }
+    updateVolume();
+
+    return { audioContext, analyser, source };
+}
+
 socket.on("ada user lain", async (joinedUsers) => {
-    remoteId = joinedUsers.find((userId) => userId !== socket.id);
-    if (remoteId) await createPeerConnection();
+    remoteId = joinedUsers.find(userId => userId !== socket.id);
+    await createPeerConnection();
 });
 
 socket.on("offer", async ({ offer, from }) => {
     remoteId = from;
-    if (!peer) await createPeerConnection();
+    await createPeerConnection();
     await peer.setRemoteDescription(new RTCSessionDescription(offer));
     const answer = await peer.createAnswer();
-    await peer.setLocalDescription(new RTCSessionDescription(answer));
+    await peer.setLocalDescription(answer);
     socket.emit("answer", { answer, to: remoteId, from: socket.id });
 });
 
 socket.on("ice candidate", async (iceCandidate) => {
-    if (peer) {
-        try {
-            const candidate = new RTCIceCandidate(iceCandidate);
-            await peer.addIceCandidate(candidate);
-        } catch (error) {
-            console.warn("Failed to add ICE candidate", error);
-        }
+    try {
+        const candidate = new RTCIceCandidate(iceCandidate);
+        await peer.addIceCandidate(candidate);
+        console.log("success add ice candidate");
+    } catch (error) {
+        console.warn("Failed to add ice candidate", error);
     }
 });
 
-socket.on("answer", async ({ answer }) => {
-    if (peer) {
-        await peer.setRemoteDescription(new RTCSessionDescription(answer));
-    }
+socket.on("answer", async ({ answer, from }) => {
+    await peer.setRemoteDescription(new RTCSessionDescription(answer));
 });
 
 async function createPeerConnection() {
@@ -44,70 +85,58 @@ async function createPeerConnection() {
             {
                 urls: "turn:numb.viagenie.ca",
                 username: "webrtc@live.com",
-                credential: "muazkh",
-            },
-        ],
+                credential: "muazkh"
+            }
+        ]
     });
 
-    const userStream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: true,
-    });
+    const userStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
     userVideo.muted = true;
     userVideo.srcObject = userStream;
-    userVideo.onloadmetadata = () => {
+    userVideo.onloadedmetadata = () => {
         userVideo.play();
     };
+    userStream.getTracks().forEach(track => peer.addTrack(track, userStream));
 
-    userStream.getTracks().forEach((track) => peer.addTrack(track, userStream));
+    if (userAudioContext) {
+        userAudioContext.close();
+    }
+    const userAudioSetup = setupAudioMeter(userStream, userVolumeBar);
+    userAudioContext = userAudioSetup.audioContext;
+    userAnalyser = userAudioSetup.analyser;
+    userSource = userAudioSetup.source;
 
     peer.onicecandidate = handleIceCandidateEvent;
     peer.ontrack = handleTrackEvent;
     peer.onnegotiationneeded = handleNegotiationNeededEvent;
 }
 
-async function handleNegotiationNeededEvent() {
-    const offer = await peer.createOffer();
-    await peer.setLocalDescription(new RTCSessionDescription(offer));
-    socket.emit("offer", { offer, to: remoteId, from: socket.id });
+function handleNegotiationNeededEvent() {
+    peer.createOffer().then(offer => {
+        return peer.setLocalDescription(offer);
+    }).then(() => {
+        socket.emit("offer", { offer: peer.localDescription, to: remoteId, from: socket.id });
+    }).catch(console.error);
 }
 
 function handleTrackEvent(e) {
     const [stream] = e.streams;
     remoteVideo.srcObject = stream;
-    remoteVideo.onloadmetadata = () => {
+    remoteVideo.muted = false;
+    remoteVideo.onloadedmetadata = () => {
         remoteVideo.play();
     };
+
+    if (remoteAudioContext) {
+        remoteAudioContext.close();
+    }
+    const remoteAudioSetup = setupAudioMeter(stream, remoteVolumeBar);
+    remoteAudioContext = remoteAudioSetup.audioContext;
+    remoteAnalyser = remoteAudioSetup.analyser;
 }
 
 function handleIceCandidateEvent(e) {
     if (e.candidate) {
-        socket.emit("ice candidate", { iceCandidate: e.candidate, to: remoteId });
+        socket.emit("ice candidate", { iceCandidate: e.candidate, to: remoteId, from: socket.id });
     }
 }
-
-const chatForm = document.getElementById("chat-form");
-const chatInput = document.getElementById("chat-input");
-const chatMessages = document.getElementById("chat-messages");
-
-chatForm.addEventListener("submit", (e) => {
-    e.preventDefault();
-    const message = chatInput.value.trim();
-    if (message) {
-        socket.emit("chatMessage", { message, from: socket.id, to: remoteId });
-        addMessageToChat("You", message); 
-        chatInput.value = ""; 
-    }
-});
-
-function addMessageToChat(user, message) {
-    const li = document.createElement("li");
-    li.textContent = `${user}: ${message}`;
-    chatMessages.appendChild(li);
-    chatMessages.scrollTop = chatMessages.scrollHeight; 
-}
-
-socket.on("chatMessage", ({ message, from }) => {
-    const sender = from === remoteId ? "User B" : "Unknown";
-    addMessageToChat(sender, message);
-});
